@@ -201,14 +201,32 @@ sample_name <- row.names(datTraits)
 
 MEs_visualization <- data.frame(sample_name,MEs,datTraits)
 
-MEs_visualization$SDATE <- as.Date(MEs_visualization$SDATE, format = "%m/%d/%Y")
+# SDATE is unreliable: Experiment 1 has it as Excel "d-mmm" text with no year
+# (e.g. "3-Sep"), and Experiment 2 is missing it entirely for every sample.
+# Both experiments share the same Time labels (PE/DE/AE/PL/DL/AL1/AL2)
+# corresponding to the same calendar dates, so derive SDATE from Time instead,
+# which is fully populated for every sample in both experiments.
+time_to_date <- c(
+  PE  = "2021-09-03",
+  DE  = "2021-09-07",
+  AE  = "2021-10-19",
+  PL  = "2021-11-29",
+  DL  = "2021-12-07",
+  AL1 = "2021-12-20",
+  AL2 = "2022-01-13"
+)
+MEs_visualization$SDATE <- as.Date(time_to_date[MEs_visualization$Time])
 
 #A and B should be the first and last column name with with ME, e.g. MEturquoise
 MEs_visualization_long <- gather(MEs_visualization,Module,ME, MEdarkgreen:MEgrey, factor_key=TRUE)
 
 MEs_visualization_long_summary2 <- summarySE(MEs_visualization_long, measurevar="ME", groupvars=c('Module',"SDATE","TRT")) 
 
-pd <- position_dodge(0.2)
+# position_dodge width of 0.2 days is invisible on a multi-month date axis;
+# widened so overlapping treatment markers at similar-value timepoints
+# (e.g. Oct 19, when groups converge toward baseline between warming periods)
+# are visibly separated rather than stacking into a single blob.
+pd <- position_dodge(width = 3)
 
 module_levels = paste0("ME",N_gene_per_module$module_name)
 
@@ -225,28 +243,41 @@ MEs_visualization_long_summary2$TRT <- factor(
 custom_colors <- viridis::viridis(4, option = "D")
 
 
-######### SELECT THE MODULES OF INTEREST BASED ON # GENES (had issue with doing it by "MEblue (XXX), etc)
-Bselect <-  MEs_visualization_long_summary2[grepl("2799|4443", MEs_visualization_long_summary2$Module), ] ## selecting background
+######### SELECT THE MODULES OF INTEREST -- match by color name, not hardcoded
+######### gene count, since blockwiseModules() module sizes can shift slightly
+######### between runs (the original "2799|4443"/"(363)"/"(297)" exact-count
+######### filters return zero rows whenever this run's module sizes differ
+######### even slightly from the original, which is why no lines were plotting)
+
+Bselect <- MEs_visualization_long_summary2[
+  MEs_visualization_long_summary2$Module %in% N_gene_per_module$name_and_number[
+    grepl("turquoise|blue", N_gene_per_module$module_name, ignore.case = TRUE)
+  ], ] ## selecting background
 
 ####################### MAGENTA AND PURPLE -- Figure 2 ############################
 # Filter to only Magenta and Purple modules
+magenta_label <- N_gene_per_module$name_and_number[grepl("^magenta$", N_gene_per_module$module_name, ignore.case = TRUE)]
+purple_label  <- N_gene_per_module$name_and_number[grepl("^purple$",  N_gene_per_module$module_name, ignore.case = TRUE)]
+
 selected_modules <- MEs_visualization_long_summary2 %>%
-  filter(Module %in% c("MEmagenta (363)", "MEpurple (297)")) %>%
-  mutate(Module = factor(Module, levels = c("MEmagenta (363)", "MEpurple (297)")))
+  filter(Module %in% c(magenta_label, purple_label)) %>%
+  mutate(Module = factor(Module, levels = c(magenta_label, purple_label)))
 
 # Define colors and shapes
 custom_colors <- viridis::viridis(n = 4, option = "D")
 custom_shapes <- c(21, 24, 23, 22)
 
+magenta_purple_labeller <- setNames(
+  c("Module 'Magenta'", "Module 'Purple'"),
+  c(magenta_label, purple_label)
+)
+
 surpervised_MEs_visualization_selected2 <- ggplot(selected_modules, aes(x = SDATE, y = ME, group = TRT, shape = TRT)) +
   geom_line(aes(color = TRT), linewidth = 2) +
-  geom_point(aes(color = TRT, fill = TRT), size = 5, stroke = 1.5) +
-  geom_errorbar(aes(ymin = ME - se, ymax = ME + se, color = TRT), width = 1.5) +
+  geom_point(aes(color = TRT, fill = TRT), size = 5, stroke = 1.5, position = pd) +
+  geom_errorbar(aes(ymin = ME - se, ymax = ME + se, color = TRT), width = 1.5, position = pd) +
   facet_wrap(~ Module, ncol = 2, 
-             labeller = labeller(Module = c(
-               "MEmagenta (363)" = "Module 'Magenta' (363 genes)", 
-               "MEpurple (297)" = "Module 'Purple' (297 genes)"
-             ))) +
+             labeller = labeller(Module = magenta_purple_labeller)) +
   scale_shape_manual(
     values = custom_shapes,
     labels = c("Control", "BLF", "ALF", "BOTH")
@@ -263,7 +294,7 @@ surpervised_MEs_visualization_selected2 <- ggplot(selected_modules, aes(x = SDAT
     breaks = sort(unique(selected_modules$SDATE)),  
     date_labels = "%b %d"
   ) +
-  scale_y_continuous(limits = c(-0.2, 0.4)) +
+  scale_y_continuous(expand = expansion(mult = 0.05)) +
   theme_bw() +
   theme(
     axis.line = element_line(colour = "black", size = 1),
@@ -294,13 +325,20 @@ ggsave("MEs_visualization_Magenta_Purple.png",
 # Define custom colors using viridis palette
 viridis_colors <- viridis_pal(option = "D", direction = 1)(4)
 
+turquoise_label <- N_gene_per_module$name_and_number[grepl("^turquoise$", N_gene_per_module$module_name, ignore.case = TRUE)]
+blue_label      <- N_gene_per_module$name_and_number[grepl("^blue$",      N_gene_per_module$module_name, ignore.case = TRUE)]
+turquoise_blue_labeller <- setNames(
+  c("Module 1 (Turquoise)", "Module 2 (Blue)"),
+  c(turquoise_label, blue_label)
+)
+
 surpervised_MEs_visualization_B3 <- 
   ggplot(Bselect, aes(x = SDATE, y = ME, group = TRT, color = TRT, shape = TRT)) +
-  geom_errorbar(aes(ymin = ME - se, ymax = ME + se), width = 0.2) +
-  geom_line(position = pd, size = 2) +
+  geom_errorbar(aes(ymin = ME - se, ymax = ME + se), width = 0.2, position = pd) +
+  geom_line(size = 2) +
   geom_point(position = pd, size = 6) +  
   facet_wrap(~ Module, ncol = 2, scales = "fixed", 
-             labeller = labeller(Module = c("MEturquoise (4443)" = "Module 1 (4,443 genes)", "MEblue (2799)" = "Module 2 (2,799 genes)"))) +
+             labeller = labeller(Module = turquoise_blue_labeller)) +
   scale_color_manual(values = viridis_colors) +
   scale_fill_manual(values = viridis_colors) +
   scale_shape_manual(values = c(16, 17, 18, 19)) +
@@ -337,25 +375,23 @@ surpervised_MEs_visualization_B3 <-
   ) +
   scale_color_manual(
     values = viridis_colors,
-    breaks = c("C", "E", "L", "EL"),
+    breaks = c("Control", "BLF Heat", "ALF Heat", "BLF + ALF Heat"),
     labels = c("Control", "Early", "Late", "Early + Late")
   ) +
   scale_fill_manual(
     values = viridis_colors,
-    breaks = c("C", "E", "L", "EL"),
+    breaks = c("Control", "BLF Heat", "ALF Heat", "BLF + ALF Heat"),
     labels = c("Control", "Early", "Late", "Early + Late")
   ) +
   scale_shape_manual(
     values = c(16, 17, 18, 19),
-    breaks = c("C", "E", "L", "EL"),
+    breaks = c("Control", "BLF Heat", "ALF Heat", "BLF + ALF Heat"),
     labels = c("Control", "Early", "Late", "Early + Late")
   )
 
 print(surpervised_MEs_visualization_B3)
 
 ggsave("MEs_visualization_BackgroundModsPAG.png", plot = surpervised_MEs_visualization_B3, width = 12, height = 7, dpi = 700)
-
-
 #######
 ### Identifying Differentially Expressed Genes
 #######
@@ -363,15 +399,12 @@ ggsave("MEs_visualization_BackgroundModsPAG.png", plot = surpervised_MEs_visuali
 coldata2 = coldata
 coldata2$Gen_Time_and_treatment = paste0(coldata2$Time, coldata2$TRT) ## creating a combination column of Time and General Treatment Name
 
-## Do nothing. Automatically DESeq2 will use the base factor level of the condition of interest as the base for statistical testing. 
 ## The base level is chosen based on alphabetical order of the levels.
 ## In the results() function you can specify the comparison of interest, and the levels to compare. 
 # The level given last is the base level for the comparison. The syntax is given below:
 # contrast <- c("condition", "level_to_compare", "base_level")
 # results(dds, contrast = contrast, alpha = alpha_threshold)
 
-## Single model fit reused for all four contrasts below (BLF/ALF/BOTH vs Control,
-## within each warming period), since they all share the same design formula.
 dds_E2 <- DESeqDataSetFromMatrix(countData = cts, colData = coldata2, design = ~  Gen_Time_and_treatment)
 
 keepE2 <- rowSums(counts(dds_E2)) >= ncol(cts)
