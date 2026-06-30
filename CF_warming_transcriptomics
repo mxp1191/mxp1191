@@ -1,0 +1,478 @@
+#############################################################################
+# Bud Transcriptomic Data Analysis
+#
+# Differential gene expression, WGCNA, and pathway enrichment analysis of
+# grapevine bud transcriptomes in response to simulated warming treatments
+# (Before Leaf Fall [BLF], After Leaf Fall [ALF], BOTH, Control).
+
+#############################################################################
+
+## ---- Packages ----
+# BiocManager::install(c("DESeq2", "WGCNA", "preprocessCore", "fgsea"))
+# install.packages(c("tidyverse", "ggpubr", "wesanderson", "Rmisc",
+#                     "factoextra", "scales", "patchwork", "cowplot",
+#                     "viridis", "VennDiagram"))
+
+library(DESeq2)
+library(WGCNA)
+library(fgsea)
+library(tidyverse)
+library(ggplot2)
+library(ggpubr)
+library(wesanderson)
+library(Rmisc)
+library(factoextra)
+library(scales)
+library(viridis)
+library(patchwork)
+library(cowplot)
+library(VennDiagram)
+
+# NOTE: WGCNA's `cor()` can mask base/stats::cor() and break DESeq2 calls.
+# Resolve conflicts as needed, e.g.:
+#   cor <- WGCNA::cor()      # before blockwiseModules()
+#   cor <- stats::cor()      # after blockwiseModules()
+
+#############################################################################
+## 1. Import and merge count matrices / sample metadata
+#############################################################################
+
+matrixFile1 <- read.delim("Gene_count_matrix_extraction_1.txt", header = FALSE, row.names = 1)
+sampleFile1 <- read.csv("MetadatEx1.csv")
+
+matrixFile2 <- read.delim("Gene_count_matrix_extraction_2.txt", header = FALSE, row.names = 1)
+sampleFile2 <- read.csv("MetadatEx2.csv")
+
+# Ensure both metadata tables share the same columns before merging
+stopifnot(identical(colnames(sampleFile1), colnames(sampleFile2)))
+
+matrixFile <- cbind(matrixFile1, matrixFile2)
+sampleFile <- rbind(sampleFile1, sampleFile2)
+
+coldata <- sampleFile
+cts <- matrixFile
+colnames(cts) <- coldata$Sample
+row.names(coldata) <- coldata$Sample
+
+cts <- cts[, colnames(cts) %in% row.names(coldata)]
+coldata <- filter(coldata, Time != "BLANK")
+cts <- cts[, row.names(coldata)]
+
+#############################################################################
+## 2. Normalize counts and filter low-expression genes (DESeq2)
+#############################################################################
+
+dds <- DESeqDataSetFromMatrix(countData = cts, colData = coldata, design = ~ TimeNum + TRT)
+
+# Retain genes with at least 5 counts/sample on average
+keep <- rowSums(counts(dds)) >= ncol(cts) * 5
+dds <- dds[keep, ]
+
+dds_out <- DESeq(dds)
+vsd <- vst(dds_out, blind = FALSE)
+cts_normalized <- as.data.frame(assay(vsd))
+
+#############################################################################
+## 3. PCA-based outlier detection and removal
+#############################################################################
+
+PCA_All <- prcomp(t(cts_normalized), scale = TRUE)
+eig.val <- get_eigenvalue(PCA_All)
+res_idv <- get_pca_ind(PCA_All)
+PCA_figure_data <- data.frame(
+  filter(coldata, row.names(coldata) %in% colnames(cts_normalized)),
+  res_idv$coord[, 1:4]
+)
+percentVar <- round(eig.val$variance.percent, 1)
+
+ggplot(PCA_figure_data, aes(x = Dim.1, y = Dim.2, col = TimeNum)) +
+  geom_point() +
+  facet_wrap(~TRT) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  theme_bw() +
+  scale_colour_manual(values = c("#046C9A", wes_palette("Zissou1", 5, type = "continuous"), "#9B110E"))
+
+ggsave("PreFilterPCA.png", width = 15, height = 11, dpi = 700)
+
+# Remove outlier sample(s) identified on PC2 (one BOTH-treatment replicate)
+outliers <- row.names(filter(PCA_figure_data, Dim.2 < -200))
+coldata <- filter(coldata, !row.names(coldata) %in% outliers)
+cts <- cts[, colnames(cts) %in% row.names(coldata)]
+stopifnot(all(rownames(coldata) == colnames(cts)))
+
+# Re-run DESeq2 normalization after outlier removal
+dds <- DESeqDataSetFromMatrix(countData = cts, colData = coldata, design = ~ TimeNum + TRT)
+keep <- rowSums(counts(dds)) >= ncol(cts) * 5
+dds <- dds[keep, ]
+dds_out <- DESeq(dds)
+
+dds_out_normalized <- data.frame(counts(dds_out, normalized = TRUE))
+vsd <- vst(dds_out, blind = FALSE)
+cts_normalized <- as.data.frame(assay(vsd))
+
+# Final PCA (post-outlier removal)
+PCA_All <- prcomp(t(cts_normalized), scale = TRUE)
+eig.val <- get_eigenvalue(PCA_All)
+res_idv <- get_pca_ind(PCA_All)
+PCA_figure_data <- data.frame(
+  filter(coldata, row.names(coldata) %in% colnames(cts_normalized)),
+  res_idv$coord[, 1:4]
+)
+percentVar <- round(eig.val$variance.percent, 1)
+
+PCA_figure_data$TRT <- factor(PCA_figure_data$TRT,
+                              levels = c("C", "E", "L", "EL"),
+                              labels = c("Control", "BLF", "ALF", "BOTH"))
+
+ggplot(PCA_figure_data, aes(x = Dim.1, y = Dim.2, col = TimeNum, shape = TRT)) +
+  geom_point(size = 5) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  ggtitle("Principal Component Analysis of bud gene expression") +
+  theme_bw() +
+  scale_colour_manual(values = c("#046C9A", wes_palette("Zissou1", 5, type = "continuous"), "#9B110E")) +
+  scale_shape_manual(values = c(15, 16, 17, 18)) +
+  labs(col = "Timepoint", shape = "Treatment")
+
+ggsave("PCA_figure.png", width = 10, height = 8, dpi = 700)
+
+#############################################################################
+## 4. WGCNA: module detection
+#############################################################################
+
+datExpr <- as.data.frame(t(cts_normalized))
+nGenes <- ncol(datExpr)
+nSamples <- nrow(datExpr)
+options(stringsAsFactors = FALSE)
+
+datTraits <- filter(coldata, row.names(coldata) %in% row.names(datExpr))
+row.names(datTraits) <- row.names(datExpr)
+
+# Soft-thresholding power selection
+powers <- c(1:10, seq(12, 20, by = 2))
+sft <- pickSoftThreshold(datExpr, powerVector = powers, verbose = 5)
+
+plot(sft$fitIndices[, 1], -sign(sft$fitIndices[, 3]) * sft$fitIndices[, 2],
+     xlab = "Soft Threshold (power)", ylab = "Scale Free Topology Model Fit, signed R^2",
+     main = "Scale independence")
+text(sft$fitIndices[, 1], -sign(sft$fitIndices[, 3]) * sft$fitIndices[, 2],
+     labels = powers, col = "red")
+abline(h = 0.90, col = "red")
+
+plot(sft$fitIndices[, 1], sft$fitIndices[, 5],
+     xlab = "Soft Threshold (power)", ylab = "Mean Connectivity",
+     main = "Mean connectivity")
+text(sft$fitIndices[, 1], sft$fitIndices[, 5], labels = powers, col = "red")
+
+# Network construction and module detection
+cor <- WGCNA::cor
+net <- blockwiseModules(datExpr, power = 12, networkType = "signed",
+                        TOMType = "signed", minModuleSize = 50,
+                        reassignThreshold = 0, mergeCutHeight = 0.25,
+                        numericLabels = TRUE, pamRespectsDendro = FALSE,
+                        saveTOMs = TRUE, saveTOMFileBase = "TOM",
+                        verbose = 3)
+cor <- stats::cor
+
+moduleLabels <- net$colors
+moduleColors <- labels2colors(net$colors)
+MEs0 <- moduleEigengenes(datExpr, moduleColors)$eigengenes
+MEs <- orderMEs(MEs0)
+geneTree <- net$dendrograms[[1]]
+
+save(MEs, moduleLabels, moduleColors, geneTree, file = "WGCNA-networkConstruction.RData")
+
+N_gene_per_module <- as.data.frame(table(moduleColors))
+names(N_gene_per_module) <- c("module_name", "Gene_number")
+N_gene_per_module <- N_gene_per_module[order(-N_gene_per_module$Gene_number), ]
+N_gene_per_module$name_and_number <- paste0("ME", N_gene_per_module$module_name,
+                                            " (", N_gene_per_module$Gene_number, ")")
+
+# Module membership (correlation of each gene with each module eigengene)
+geneModuleMembership <- as.data.frame(cor(datExpr, MEs, use = "p"))
+MMpval <- as.data.frame(corPvalueStudent(as.matrix(geneModuleMembership), nSamples))
+modNames <- substring(names(MEs), 3)
+names(geneModuleMembership) <- modNames
+names(MMpval) <- modNames
+geneModuleMembership$final_module <- moduleColors
+MMpval$final_module <- moduleColors
+geneModuleMembership$gene_name <- row.names(geneModuleMembership)
+MMpval$gene_name <- row.names(MMpval)
+
+#############################################################################
+## 5. Module eigengene visualization over time
+#############################################################################
+
+MEs_visualization <- data.frame(sample_name = row.names(datTraits), MEs, datTraits)
+MEs_visualization$SDATE <- as.Date(MEs_visualization$SDATE, format = "%m/%d/%Y")
+
+MEs_long <- gather(MEs_visualization, Module, ME,
+                   names(MEs)[1]:names(MEs)[length(names(MEs))], factor_key = TRUE)
+
+MEs_summary <- summarySE(MEs_long, measurevar = "ME", groupvars = c("Module", "SDATE", "TRT"))
+
+module_levels <- paste0("ME", N_gene_per_module$module_name)
+MEs_summary$Module <- factor(MEs_summary$Module, levels = module_levels,
+                             labels = N_gene_per_module$name_and_number)
+MEs_summary$TRT <- factor(MEs_summary$TRT, levels = c("C", "E", "L", "EL"),
+                          labels = c("Control", "BLF", "ALF", "BOTH"))
+
+custom_colors <- viridis(4, option = "D")
+pd <- position_dodge(0.2)
+
+# Largest modules: Turquoise and Blue (treatment x time trends)
+Bselect <- MEs_summary[grepl("Turquoise|Blue", MEs_summary$Module), ]
+
+eigengene_plot_TurqBlue <- ggplot(Bselect, aes(x = SDATE, y = ME, group = TRT, shape = TRT)) +
+  geom_line(aes(color = TRT), linewidth = 1.2) +
+  geom_point(aes(color = TRT, fill = TRT), size = 4, stroke = 1.2) +
+  geom_errorbar(aes(ymin = ME - se, ymax = ME + se, color = TRT), width = 1.5) +
+  facet_wrap(~Module, ncol = 2) +
+  scale_shape_manual(values = c(21, 24, 23, 22)) +
+  scale_color_manual(values = custom_colors) +
+  scale_fill_manual(values = custom_colors) +
+  scale_x_date(breaks = sort(unique(Bselect$SDATE)), date_labels = "%b %d") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.65),
+        legend.position = "top", legend.title = element_blank(),
+        panel.grid = element_blank(), strip.background = element_blank()) +
+  labs(x = NULL, y = "Module Eigengene (ME)")
+
+ggsave("ME_TurquoiseBlue.png", plot = eigengene_plot_TurqBlue, width = 16, height = 11, dpi = 700)
+
+# Smaller treatment-responsive modules: Magenta (Sept) and Purple (Dec)
+MagentaPurple <- MEs_summary %>%
+  filter(grepl("Magenta|Purple", Module)) %>%
+  mutate(Module = factor(Module, levels = grep("Magenta|Purple", module_levels, value = TRUE,
+                                               ignore.case = TRUE)))
+
+eigengene_plot_MagentaPurple <- ggplot(MagentaPurple, aes(x = SDATE, y = ME, group = TRT, shape = TRT)) +
+  geom_line(aes(color = TRT), linewidth = 1.2) +
+  geom_point(aes(color = TRT, fill = TRT), size = 4, stroke = 1.2) +
+  geom_errorbar(aes(ymin = ME - se, ymax = ME + se, color = TRT), width = 1.5) +
+  facet_wrap(~Module, ncol = 2) +
+  scale_shape_manual(values = c(21, 24, 23, 22)) +
+  scale_color_manual(values = custom_colors) +
+  scale_fill_manual(values = custom_colors) +
+  scale_x_date(breaks = sort(unique(MagentaPurple$SDATE)), date_labels = "%b %d") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.65),
+        legend.position = "top", legend.title = element_blank(),
+        panel.grid = element_blank(), strip.background = element_blank()) +
+  labs(x = NULL, y = "Module eigengene")
+
+ggsave("ME_MagentaPurple.png", plot = eigengene_plot_MagentaPurple, width = 16, height = 11, dpi = 700)
+
+#############################################################################
+## 6. Differential expression analysis: each treatment vs Control
+##    within each warming period (DESeq2 contrasts)
+#############################################################################
+
+coldata2 <- coldata
+coldata2$Gen_Time_and_treatment <- paste0(coldata2$Time, coldata2$TRT)
+
+dds_contrast <- DESeqDataSetFromMatrix(countData = cts, colData = coldata2,
+                                       design = ~ Gen_Time_and_treatment)
+keep <- rowSums(counts(dds_contrast)) >= ncol(cts)
+dds_contrast <- dds_contrast[keep, ]
+dds_contrast_out <- DESeq(dds_contrast)
+
+extract_DEGs <- function(dds_out, contrast_vec, lfc_threshold = 1, padj_threshold = 0.05) {
+  res <- results(dds_out, contrast = contrast_vec)
+  print(summary(res))
+  res_df <- as.data.frame(res)
+  res_target <- filter(res_df, padj < padj_threshold, abs(log2FoldChange) > lfc_threshold)
+  res_target$gene_id <- row.names(res_target)
+  list(all = res_df, sig = res_target)
+}
+
+# September warming period (timepoint "DE"): BLF vs Control, BOTH vs Control
+res_BLF_C_Sept  <- extract_DEGs(dds_contrast_out, c("Gen_Time_and_treatment", "DEE",  "DEC"))
+res_BOTH_C_Sept <- extract_DEGs(dds_contrast_out, c("Gen_Time_and_treatment", "DEEL", "DEC"))
+
+# December warming period (timepoint "DL"): ALF vs Control, BOTH vs Control
+res_ALF_C_Dec   <- extract_DEGs(dds_contrast_out, c("Gen_Time_and_treatment", "DLL",  "DLC"))
+res_BOTH_C_Dec  <- extract_DEGs(dds_contrast_out, c("Gen_Time_and_treatment", "DLEL", "DLC"))
+
+#############################################################################
+## 7. Functional annotation and pathway overrepresentation analysis (ORA)
+##    fgsea::fora() against VitisNet pathway gene sets
+#############################################################################
+
+# `gene_id_map`     : table mapping pipeline gene IDs to annotated (V1) gene IDs
+# `Gene_function`    : table of functional annotation / VitisNet pathway per gene
+gene_id_map   <- read.delim("gene_id_correspondence.txt", header = TRUE)
+Gene_function <- read.delim("VitisNet_gene_function.txt", header = TRUE)
+vitis_pathway <- gmtPathways("GSEA_geneset_from_VitisNet.gmt")
+
+annotate_DEGs <- function(res_target) {
+  res_target$v1_gene_id <- gene_id_map$v1.name[match(res_target$gene_id,
+                                                     gene_id_map$Final.v3.name..tentative.creation.of.new.genes)]
+  res_target$encoding_protein <- Gene_function$Functional.annotation[match(res_target$v1_gene_id,
+                                                                           Gene_function$Unique.ID)]
+  res_target$pathway <- Gene_function$Network[match(res_target$v1_gene_id, Gene_function$Unique.ID)]
+  filter(res_target, !is.na(pathway), pathway != "")
+}
+
+run_ORA <- function(res_all, res_target_annotated) {
+  universe <- gene_id_map$v1.name[match(row.names(res_all),
+                                        gene_id_map$Final.v3.name..tentative.creation.of.new.genes)]
+  universe <- universe[!is.na(universe) & universe != ""]
+  fora(pathways = vitis_pathway, genes = res_target_annotated$v1_gene_id,
+       minSize = 2, maxSize = 500, universe = universe)
+}
+
+# --- BLF vs Control (September) ---
+res_BLF_C_Sept$sig_annot <- annotate_DEGs(res_BLF_C_Sept$sig)
+ORA_BLF_Sept <- run_ORA(res_BLF_C_Sept$all, res_BLF_C_Sept$sig_annot)
+ORA_BLF_Sept_sig <- filter(ORA_BLF_Sept, padj < 0.05) %>%
+  mutate(poverlap = overlap / size * 100) %>%
+  arrange(desc(poverlap))
+
+# --- ALF vs Control (December) ---
+res_ALF_C_Dec$sig_annot <- annotate_DEGs(res_ALF_C_Dec$sig)
+ORA_ALF_Dec <- run_ORA(res_ALF_C_Dec$all, res_ALF_C_Dec$sig_annot)
+ORA_ALF_Dec_sig <- filter(ORA_ALF_Dec, padj < 0.05) %>%
+  mutate(poverlap = overlap / size * 100) %>%
+  arrange(desc(poverlap))
+
+# --- BOTH vs Control (September & December) ---
+res_BOTH_C_Sept$sig_annot <- annotate_DEGs(res_BOTH_C_Sept$sig)
+ORA_BOTH_Sept <- run_ORA(res_BOTH_C_Sept$all, res_BOTH_C_Sept$sig_annot)
+ORA_BOTH_Sept_sig <- filter(ORA_BOTH_Sept, padj < 0.05) %>%
+  mutate(poverlap = overlap / size * 100) %>%
+  arrange(desc(poverlap))
+
+res_BOTH_C_Dec$sig_annot <- annotate_DEGs(res_BOTH_C_Dec$sig)
+ORA_BOTH_Dec <- run_ORA(res_BOTH_C_Dec$all, res_BOTH_C_Dec$sig_annot)
+ORA_BOTH_Dec_sig <- filter(ORA_BOTH_Dec, padj < 0.05) %>%
+  mutate(poverlap = overlap / size * 100) %>%
+  arrange(desc(poverlap))
+
+# Export ORA result tables (Supplemental Tables 1-4)
+write.csv(ORA_BLF_Sept_sig,  "ORA_BLF_vs_Control_Sept.csv",  row.names = FALSE)
+write.csv(ORA_BOTH_Sept_sig, "ORA_BOTH_vs_Control_Sept.csv", row.names = FALSE)
+write.csv(ORA_ALF_Dec_sig,   "ORA_ALF_vs_Control_Dec.csv",   row.names = FALSE)
+write.csv(ORA_BOTH_Dec_sig,  "ORA_BOTH_vs_Control_Dec.csv",  row.names = FALSE)
+
+#############################################################################
+## 8. Pathway enrichment bar charts
+#############################################################################
+
+plot_pathway_barchart <- function(path_df, title, custom_labels = NULL) {
+  path_df$pathway <- factor(path_df$pathway, levels = path_df$pathway[order(-path_df$poverlap)])
+  p <- ggplot(path_df, aes(x = poverlap, y = fct_rev(pathway), fill = padj)) +
+    geom_bar(stat = "identity", color = "black") +
+    scale_fill_gradient(low = "#7876B1FF", high = "#6F99ADFF",
+                        limits = c(0, 0.05), breaks = c(0.01, 0.05)) +
+    labs(x = "Percent of total pathway enriched (%)", title = title,
+         fill = expression(bold(p[adj]))) +
+    theme_classic() +
+    theme(axis.title.y = element_blank(),
+          axis.text.y = element_text(size = 12, face = "bold")) +
+    scale_x_continuous(expand = c(0, 0), limits = c(0, 30))
+  if (!is.null(custom_labels)) p <- p + scale_y_discrete(labels = custom_labels)
+  p
+}
+
+barchart_BLF  <- plot_pathway_barchart(ORA_BLF_Sept_sig, "During BLF (September) Warming")
+barchart_ALF  <- plot_pathway_barchart(ORA_ALF_Dec_sig,  "During ALF (December) Warming")
+
+ggsave("EnrichedPathways_BLF.png", plot = barchart_BLF, width = 16, height = 10, dpi = 700)
+ggsave("EnrichedPathways_ALF.png", plot = barchart_ALF, width = 16, height = 10, dpi = 700)
+
+#############################################################################
+## 9. Representative gene-level expression plots for enriched pathways:
+##    AP2/EREBP, NAC, ethylene signaling, phenylpropanoid biosynthesis
+##    (September warming); gibberellin signaling, methane metabolism,
+##    galactose metabolism (December warming)
+#############################################################################
+
+# Long-format normalized expression table for plotting individual genes
+colnames(dds_out_normalized) <- colnames(cts_normalized)
+gene_expr_long <- dds_out_normalized
+gene_expr_long$gene_id <- row.names(gene_expr_long)
+gene_expr_long <- gather(gene_expr_long, Sample, Expression,
+                         colnames(gene_expr_long)[1]:colnames(gene_expr_long)[ncol(gene_expr_long) - 1],
+                         factor_key = TRUE)
+gene_expr_long <- na.omit(gene_expr_long)
+
+probes <- match(gene_expr_long$Sample, row.names(coldata))
+gene_expr_long$Time <- coldata$Time[probes]
+gene_expr_long$TRT  <- coldata$TRT[probes]
+
+probes2 <- match(gene_expr_long$gene_id, gene_id_map$Final.v3.name..tentative.creation.of.new.genes)
+gene_expr_long$v1_gene_id <- gene_id_map$v1.name[probes2]
+gene_expr_long$encoding_protein <- Gene_function$Functional.annotation[match(gene_expr_long$v1_gene_id, Gene_function$Unique.ID)]
+gene_expr_long$pathway <- Gene_function$Network[match(gene_expr_long$v1_gene_id, Gene_function$Unique.ID)]
+
+gene_expr_summary <- summarySE(gene_expr_long, measurevar = "Expression",
+                               groupvars = c("v1_gene_id", "Time", "TRT", "gene_id",
+                                             "encoding_protein", "pathway"))
+
+# Generic helper: bar plot of representative DEGs from a given pathway,
+# contrasting one warming treatment vs Control at the relevant timepoint
+plot_pathway_genes <- function(gene_ids, timepoint, trt_levels, trt_labels, fill_colors, y_limit) {
+  df <- filter(gene_expr_summary, v1_gene_id %in% gene_ids, Time == timepoint, TRT %in% trt_levels)
+  df$subtitle <- paste0(df$gene_id, "\n", df$encoding_protein)
+  df$TRT <- factor(df$TRT, levels = trt_levels, labels = trt_labels)
+  
+  ggplot(df, aes(x = TRT, y = Expression, fill = TRT)) +
+    geom_bar(stat = "identity", position = "dodge", color = "black") +
+    geom_errorbar(aes(ymin = Expression - se, ymax = Expression + se), width = 0.2) +
+    facet_wrap(~subtitle, ncol = 4, scales = "fixed") +
+    scale_fill_manual(values = fill_colors) +
+    theme_bw() +
+    labs(x = NULL, y = "Normalized gene expression") +
+    theme(panel.grid = element_blank(), legend.position = "none",
+          strip.background = element_blank()) +
+    scale_y_continuous(limits = c(0, y_limit), expand = c(0, 0))
+}
+
+colors_warm_control <- c("#440154FF", "#31688EFF")
+
+# Example calls (gene ID lists populated from each pathway's ORA overlapGenes;
+# see pathway enrichment result tables for full DEG/pathway membership)
+# AP2_genes / NAC_genes / ethylene_genes / phenylpropanoid_genes <- c(...)
+# gibberellin_genes / methane_genes / galactose_genes <- c(...)
+
+# plot_AP2  <- plot_pathway_genes(AP2_genes,  "DE", c("C","E"), c("Control","BLF"), colors_warm_control, 2000)
+# plot_NAC  <- plot_pathway_genes(NAC_genes,  "DE", c("C","E"), c("Control","BLF"), colors_warm_control, 1000)
+# plot_ETH  <- plot_pathway_genes(ethylene_genes, "DE", c("C","E"), c("Control","BLF"), colors_warm_control, 1000)
+# plot_PHEN <- plot_pathway_genes(phenylpropanoid_genes, "DE", c("C","E"), c("Control","BLF"), colors_warm_control, 300)
+#
+# SeptemberWarming_panel <- plot_grid(plot_AP2 + labs(tag = "A"), plot_NAC + labs(tag = "B"),
+#                       plot_ETH + labs(tag = "C"), plot_PHEN + labs(tag = "D"), ncol = 1)
+# ggsave("SeptemberWarming_DEGs_panel.png", plot = SeptemberWarming_panel, width = 16, height = 14, dpi = 700)
+#
+# plot_GIB <- plot_pathway_genes(gibberellin_genes, "DL", c("C","L"), c("Control","ALF"), colors_warm_control, 150)
+# plot_MET <- plot_pathway_genes(methane_genes,     "DL", c("C","L"), c("Control","ALF"), colors_warm_control, 125)
+# plot_GAL <- plot_pathway_genes(galactose_genes,   "DL", c("C","L"), c("Control","ALF"), colors_warm_control, 1500)
+#
+# DecemberWarming_panel <- plot_grid(plot_GIB + labs(tag = "A"), plot_MET + labs(tag = "B"), ncol = 1)
+# ggsave("DecemberWarming_DEGs_upregulated_panel.png", plot = DecemberWarming_panel, width = 14, height = 8, dpi = 700)
+# ggsave("GalactoseMetabolism_DEGs.png", plot = plot_GAL, width = 15, height = 11, dpi = 700)
+
+#############################################################################
+## 10. Overlap of DEGs shared between BLF (Sept) and ALF (Dec)
+#############################################################################
+
+genes_BLF <- res_BLF_C_Sept$sig$gene_id
+genes_ALF <- res_ALF_C_Dec$sig$gene_id
+
+shared_genes  <- intersect(genes_BLF, genes_ALF)
+unique_BLF    <- setdiff(genes_BLF, genes_ALF)
+unique_ALF    <- setdiff(genes_ALF, genes_BLF)
+
+length(shared_genes)  # DEGs shared between BLF and ALF contrasts
+length(unique_BLF)
+length(unique_ALF)
+
+venn.plot <- venn.diagram(
+  x = list("BLF vs Control" = genes_BLF, "ALF vs Control" = genes_ALF),
+  filename = NULL,
+  fill = c("skyblue", "pink"),
+  alpha = 0.5, cex = 1.5, cat.cex = 1.2
+)
+grid::grid.draw(venn.plot)
