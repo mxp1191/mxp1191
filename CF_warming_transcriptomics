@@ -3,7 +3,8 @@
 #
 # DESeq2, WGCNA, and pathway enrichment analysis of grapevine bud
 # transcriptomes in response to simulated warming treatments
-# (BLF = Before Leaf Fall, ALF = After Leaf Fall, BOTH, Control).
+# (BLF = Before Leaf Fall, ALF = After Leaf Fall, BOTH (BLF + ALF), Control).
+# Sometimes BLF is labeled "Early" and ALF is labeled "Late" in code.
 #############################################################################
 
 library(WGCNA)
@@ -379,8 +380,8 @@ res_PL_C_EL_target <- filter(res_PL_C_EL, padj < 0.05, abs(log2FoldChange) > 1)
 res_PL_C_EL_target$V3_gene_name = row.names(res_PL_C_EL_target)
 
 # --- DL: During Late Heat (December 7 / ALF warming) ---
-# Note: E-treatment buds were not collected during the December heat window,
-# so only C, L, and EL are compared at this timepoint.
+# Note: E-treatment buds were not collected during the December heat window)
+
 res_L <- results(dds_al_out, contrast = c("Gen_Time_and_treatment", "DLL", "DLC"))
 summary(res_L)
 res_L <- filter(data.frame(res_L))
@@ -575,8 +576,11 @@ ap2_select <- gene_matrix_expression_long_summary %>%
 ap2_select$subtitle <- paste0(ap2_select$gene_name, "\n", ap2_select$encoding_protein)
 ap2_select$TRT <- factor(ap2_select$TRT, labels = c("Control", "BLF"))
 
-sorted_ap2 <- ap2_select[order(ap2_select$Expression, decreasing = TRUE),]
-top4_ap2_genes <- unique(head(sorted_ap2$V1_name, 4))
+ap2_gene_max <- ap2_select %>%
+  dplyr::group_by(V1_name) %>%
+  dplyr::summarise(max_expr = max(Expression), .groups = "drop") %>%
+  arrange(desc(max_expr))
+top4_ap2_genes <- head(ap2_gene_max$V1_name, 4)
 top4_ap2 <- ap2_select %>% filter(V1_name %in% top4_ap2_genes)
 
 top_ap2_plot <- ggplot(top4_ap2, aes(x = TRT, y = Expression, fill = TRT)) +
@@ -598,8 +602,11 @@ nac_select <- gene_matrix_expression_long_summary %>%
 nac_select$subtitle <- paste0(nac_select$gene_name, "\n", nac_select$encoding_protein)
 nac_select$TRT <- factor(nac_select$TRT, labels = c("Control", "BLF"))
 
-sorted_nac <- nac_select[order(nac_select$Expression, decreasing = TRUE),]
-top4_nac_genes <- unique(head(sorted_nac$V1_name, 4))
+nac_gene_max <- nac_select %>%
+  dplyr::group_by(V1_name) %>%
+  dplyr::summarise(max_expr = max(Expression), .groups = "drop") %>%
+  arrange(desc(max_expr))
+top4_nac_genes <- head(nac_gene_max$V1_name, 4)
 top4_nac <- nac_select %>% filter(V1_name %in% top4_nac_genes)
 
 top_nac_plot <- ggplot(top4_nac, aes(x = TRT, y = Expression, fill = TRT)) +
@@ -621,8 +628,11 @@ ph_select <- gene_matrix_expression_long_summary %>%
 ph_select$subtitle <- paste0(ph_select$gene_name, "\n", ph_select$encoding_protein)
 ph_select$TRT <- factor(ph_select$TRT, labels = c("Control", "BLF"))
 
-sorted_ph <- ph_select[order(ph_select$Expression, decreasing = TRUE),]
-top4_ph_genes <- unique(head(sorted_ph$V1_name, 4))
+ph_gene_max <- ph_select %>%
+  dplyr::group_by(V1_name) %>%
+  dplyr::summarise(max_expr = max(Expression), .groups = "drop") %>%
+  arrange(desc(max_expr))
+top4_ph_genes <- head(ph_gene_max$V1_name, 4)
 top4_ph <- ph_select %>% filter(V1_name %in% top4_ph_genes)
 
 top_ph_plot <- ggplot(top4_ph, aes(x = TRT, y = Expression, fill = TRT)) +
@@ -695,6 +705,55 @@ gib_big_plot <- ggplot(gib_big_data, aes(x = TRT, y = Expression, fill = TRT)) +
 
 gibberellin_combined <- gib_big_plot + gib_small_plot + plot_layout(widths = c(1, 3))
 ggsave("LateTreat_Gibberellin_combined.png", plot = gibberellin_combined, width = 12, height = 6, dpi = 700)
+
+# --- Galactose metabolism ---
+# Top 5 genes by peak expression are shown; the single highest-expressing
+# gene (Alkaline alpha galactosidase) is plotted on its own y-axis scale
+# and combined with the remaining four via patchwork, matching the
+# original figure layout.
+gal_genes <- exploded_L %>% filter(pathway == "vv10052Galactose_metabolism") %>% pull(overlapGenes)
+
+gal_select <- gene_matrix_expression_long_summary %>%
+  filter(V1_name %in% gal_genes, Time == "DL", TRT %in% c("L", "C")) %>%
+  mutate(subtitle = paste0(gene_name, "\n", encoding_protein),
+         TRT = factor(TRT, levels = c("C", "L"), labels = c("Control", "ALF")))
+
+# Rank by gene (not by row) to avoid collapsing distinct genes that each
+# rank highly within their own Control/ALF row pair
+gal_gene_max <- gal_select %>%
+  dplyr::group_by(V1_name) %>%
+  dplyr::summarise(max_expr = max(Expression), .groups = "drop") %>%
+  arrange(desc(max_expr))
+
+top5_gal_genes <- head(gal_gene_max$V1_name, 5)
+gal_big_gene <- top5_gal_genes[1]
+gal_small_genes <- top5_gal_genes[-1]
+
+gal_big_data <- filter(gal_select, V1_name == gal_big_gene)
+gal_small_data <- filter(gal_select, V1_name %in% gal_small_genes)
+
+gal_big_plot <- ggplot(gal_big_data, aes(x = TRT, y = Expression, fill = TRT)) +
+  geom_bar(stat = "identity", position = "dodge", color = "black") +
+  geom_errorbar(aes(ymin = Expression - se, ymax = Expression + se), width = 0.2) +
+  facet_wrap(~subtitle, ncol = 1) +
+  scale_fill_manual(values = colors_late) +
+  theme_bw() +
+  labs(x = NULL, y = "Normalized gene expression") +
+  theme(panel.grid = element_blank(), legend.position = "none", strip.background = element_blank()) +
+  scale_y_continuous(limits = c(0, 1600), expand = c(0, 0))
+
+gal_small_plot <- ggplot(gal_small_data, aes(x = TRT, y = Expression, fill = TRT)) +
+  geom_bar(stat = "identity", position = "dodge", color = "black") +
+  geom_errorbar(aes(ymin = Expression - se, ymax = Expression + se), width = 0.2) +
+  facet_wrap(~subtitle, ncol = 2) +
+  scale_fill_manual(values = colors_late) +
+  theme_bw() +
+  labs(x = NULL, y = "Normalized gene expression") +
+  theme(panel.grid = element_blank(), legend.position = "none", strip.background = element_blank()) +
+  scale_y_continuous(limits = c(0, 800), expand = c(0, 0))
+
+galactose_combined <- gal_big_plot + gal_small_plot + plot_layout(widths = c(1.5, 2))
+ggsave("LateTreat_Galactose_Top5.png", plot = galactose_combined, width = 15, height = 10, dpi = 700)
 
 # --- Methane metabolism ---
 meth_genes <- exploded_L %>% filter(pathway == "vv10680Methane_metabolism") %>% pull(overlapGenes)
@@ -779,7 +838,7 @@ venn.plot <- ggVennDiagram(
 ggsave("Venn_CvsE_CvsL_overlap.png", plot = venn.plot, width = 6, height = 6, dpi = 700)
 
 #############################################################################
-## 10. Shared-gene expression matrix
+## 12. Shared-gene expression matrix
 #############################################################################
 
 colnames(dds_out_normalized) = colnames(cts_normalized)
@@ -810,7 +869,7 @@ gene_matrix_expression_long_summary$encoding_protein = Gene_function$Functional.
 gene_matrix_expression_long_summary$pathway = Gene_function$Network[match(gene_matrix_expression_long_summary$V1_name, Gene_function$Unique.ID)]
 
 #############################################################################
-## 11. Shared genes bar graph (colored facets, non-pooled C vs E x C vs L)
+## 13. Shared genes bar graph (colored facets, non-pooled C vs E x C vs L)
 #############################################################################
 
 select_shared <- subset(gene_matrix_expression_long_summary, gene_name %in% shared_genes)
